@@ -49,12 +49,13 @@ def order_items_text(items: Iterable) -> str:
     """Render order items list. Supports both 'product_name' (orders) and 'name' (cart)."""
     lines = []
     for item in items:
-        # Support both 'product_name' (from orders) and 'name' (from cart)
-        product_name = item.get('product_name') or item.get('name', 'Неизвестный товар')
+        # sqlite3.Row has no .get(), so normalize it to a dict first.
+        row = dict(item)
+        product_name = row.get("product_name") or row.get("name") or "Неизвестный товар"
         lines.append(
             f"• {html.escape(str(product_name))} — "
-            f"{item['qty']} шт. × {fmt_price(item['price'])} = "
-            f"{fmt_price(int(item['price']) * int(item['qty']))}"
+            f"{row['qty']} шт. × {fmt_price(row['price'])} = "
+            f"{fmt_price(int(row['price']) * int(row['qty']))}"
         )
     return "\n".join(lines)
 
