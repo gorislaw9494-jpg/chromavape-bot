@@ -1,0 +1,23 @@
+[Unit]
+Description=ChromaVape Telegram Shop Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chromavape
+Group=chromavape
+WorkingDirectory=/opt/chromavape
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/chromavape/.venv/bin/python /opt/chromavape/bot.py
+Restart=always
+RestartSec=5
+# Ограничения безопасности
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/chromavape
+
+[Install]
+WantedBy=multi-user.target
