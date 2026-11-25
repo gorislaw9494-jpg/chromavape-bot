@@ -44,10 +44,13 @@ def is_admin(user_id: int) -> bool:
 
 
 def order_items_text(items: Iterable) -> str:
+    """Render order items list. Supports both 'product_name' (orders) and 'name' (cart)."""
     lines = []
     for item in items:
+        # Support both 'product_name' (from orders) and 'name' (from cart)
+        product_name = item.get('product_name') or item.get('name', 'Неизвестный товар')
         lines.append(
-            f"• {html.escape(str(item['product_name']))} — "
+            f"• {html.escape(str(product_name))} — "
             f"{item['qty']} шт. × {fmt_price(item['price'])} = "
             f"{fmt_price(int(item['price']) * int(item['qty']))}"
         )
