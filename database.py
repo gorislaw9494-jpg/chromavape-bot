@@ -12,11 +12,12 @@ CATEGORY_SEED = [
     ("consumables", "Расходники", "🔧", 3),
 ]
 
-ORDER_STATUSES = ("new", "accepted", "shipped", "completed", "cancelled")
+ORDER_STATUSES = ("new", "accepted", "processing", "shipped", "completed", "cancelled")
 
 STATUS_TRANSITIONS = {
     "new": {"accepted", "cancelled"},
-    "accepted": {"shipped", "cancelled"},
+    "accepted": {"processing", "shipped", "completed", "cancelled"},
+    "processing": {"shipped", "completed", "cancelled"},
     "shipped": {"completed", "cancelled"},
     "completed": set(),
     "cancelled": set(),
@@ -62,6 +63,10 @@ CREATE TABLE IF NOT EXISTS orders (
     user_id INTEGER NOT NULL,
     username TEXT,
     full_name TEXT,
+    phone TEXT,
+    delivery_method TEXT,
+    address TEXT,
+    comment TEXT,
     total INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'new',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
@@ -76,9 +81,31 @@ CREATE TABLE IF NOT EXISTS order_items (
     qty INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS order_status_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    changed_by INTEGER,
+    changed_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER,
+    user_id INTEGER NOT NULL,
+    sender TEXT NOT NULL,
+    message_type TEXT NOT NULL DEFAULT 'text',
+    text TEXT,
+    file_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_status_history_order ON order_status_history(order_id);
+CREATE INDEX IF NOT EXISTS idx_chat_order ON chat_messages(order_id);
+CREATE INDEX IF NOT EXISTS idx_chat_user ON chat_messages(user_id);
 """
 
 
@@ -105,12 +132,35 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode = WAL")
         await self._conn.execute("PRAGMA foreign_keys = ON")
         await self._conn.executescript(SCHEMA)
+        await self._migrate_schema()
         for slug, title, emoji, sort_order in CATEGORY_SEED:
             await self._conn.execute(
                 """INSERT OR IGNORE INTO categories (slug, title, emoji, sort_order)
                    VALUES (?, ?, ?, ?)""",
                 (slug, title, emoji, sort_order),
             )
+
+    async def _migrate_schema(self) -> None:
+        """Add new order columns to an existing database without losing data."""
+        async with self.conn.execute("PRAGMA table_info(orders)") as cursor:
+            columns = {row["name"] for row in await cursor.fetchall()}
+        additions = {
+            "phone": "TEXT",
+            "delivery_method": "TEXT",
+            "address": "TEXT",
+            "comment": "TEXT",
+        }
+        for name, sql_type in additions.items():
+            if name not in columns:
+                await self.conn.execute(f"ALTER TABLE orders ADD COLUMN {name} {sql_type}")
+        await self.conn.execute(
+            """INSERT INTO order_status_history (order_id, status, changed_at)
+               SELECT o.id, o.status, o.created_at
+               FROM orders o
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM order_status_history h WHERE h.order_id = o.id
+               )"""
+        )
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -282,26 +332,49 @@ class Database:
         await self.conn.execute("DELETE FROM cart_items WHERE user_id = ?", (user_id,))
 
     # ------------------------------------------------------------------ orders
-    async def create_order(self, user_id: int) -> int:
-        items = [item for item in await self.get_cart_items(user_id) if item["is_active"]]
-        if not items:
-            raise OrderError("empty_cart")
-
-        for item in items:
-            if int(item["qty"]) > int(item["stock"]):
-                raise OrderError(f"stock:{item['name']}")
-
-        total = sum(int(item["price"]) * int(item["qty"]) for item in items)
+    async def create_order(
+        self,
+        user_id: int,
+        phone: str,
+        delivery_method: str,
+        address: str | None = None,
+        comment: str | None = None,
+        full_name: str | None = None,
+    ) -> int:
         user = await self.get_user(user_id)
         username = user["username"] if user else None
-        full_name = user["first_name"] if user else None
+        display_name = (full_name or (user["first_name"] if user else "") or "").strip() or None
 
+        # BEGIN IMMEDIATE before reading the cart protects against double-click
+        # creating two orders from the same cart.
         await self.conn.execute("BEGIN IMMEDIATE")
         try:
+            items = [
+                item for item in await self.get_cart_items(user_id) if int(item["is_active"])
+            ]
+            if not items:
+                raise OrderError("empty_cart")
+
+            for item in items:
+                if int(item["qty"]) > int(item["stock"]):
+                    raise OrderError(f"stock:{item['name']}")
+
+            total = sum(int(item["price"]) * int(item["qty"]) for item in items)
             cursor = await self.conn.execute(
-                """INSERT INTO orders (user_id, username, full_name, total, status, created_at)
-                   VALUES (?, ?, ?, ?, 'new', datetime('now', 'localtime'))""",
-                (user_id, username, full_name, total),
+                """INSERT INTO orders
+                       (user_id, username, full_name, phone, delivery_method,
+                        address, comment, total, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', datetime('now', 'localtime'))""",
+                (
+                    user_id,
+                    username,
+                    display_name,
+                    phone,
+                    delivery_method,
+                    address,
+                    comment,
+                    total,
+                ),
             )
             order_id = int(cursor.lastrowid or 0)
             for item in items:
@@ -320,6 +393,11 @@ class Database:
                     "UPDATE products SET stock = stock - ? WHERE id = ?",
                     (int(item["qty"]), int(item["product_id"])),
                 )
+            await self.conn.execute(
+                """INSERT INTO order_status_history (order_id, status, changed_by)
+                   VALUES (?, 'new', ?)""",
+                (order_id, user_id),
+            )
             await self.conn.execute("DELETE FROM cart_items WHERE user_id = ?", (user_id,))
             await self.conn.execute("COMMIT")
         except Exception:
@@ -339,6 +417,46 @@ class Database:
         return await self.fetch_all(
             "SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT ?",
             (user_id, limit),
+        )
+
+    async def get_last_user_order(self, user_id: int) -> Optional[aiosqlite.Row]:
+        return await self.fetch_one(
+            "SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        )
+
+    async def add_chat_message(
+        self,
+        user_id: int,
+        sender: str,
+        text: str | None = None,
+        file_id: str | None = None,
+        order_id: int | None = None,
+        message_type: str = "text",
+    ) -> int:
+        cursor = await self.conn.execute(
+            """INSERT INTO chat_messages
+                   (order_id, user_id, sender, message_type, text, file_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (order_id, user_id, sender, message_type, text, file_id),
+        )
+        return int(cursor.lastrowid or 0)
+
+    async def get_chat_history(
+        self, order_id: int, limit: int = 10
+    ) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            """SELECT * FROM chat_messages
+               WHERE order_id = ?
+               ORDER BY id DESC LIMIT ?""",
+            (order_id, limit),
+        )
+
+    async def get_status_history(self, order_id: int) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            """SELECT * FROM order_status_history
+               WHERE order_id = ? ORDER BY id""",
+            (order_id,),
         )
 
     async def count_orders(self, status: str | None = None) -> int:
@@ -361,7 +479,9 @@ class Database:
             (status, per_page, page * per_page),
         )
 
-    async def update_order_status(self, order_id: int, new_status: str) -> str | None:
+    async def update_order_status(
+        self, order_id: int, new_status: str, changed_by: int | None = None
+    ) -> str | None:
         """Change order status. Returns previous status or None if change is not allowed."""
         order = await self.get_order(order_id)
         if order is None:
@@ -383,14 +503,30 @@ class Database:
                             "UPDATE products SET stock = stock + ? WHERE id = ?",
                             (int(item["qty"]), int(item["product_id"])),
                         )
+                await self.conn.execute(
+                    """INSERT INTO order_status_history (order_id, status, changed_by)
+                       VALUES (?, ?, ?)""",
+                    (order_id, new_status, changed_by),
+                )
                 await self.conn.execute("COMMIT")
             except Exception:
                 await self.conn.execute("ROLLBACK")
                 raise
         else:
-            await self.conn.execute(
-                "UPDATE orders SET status = ? WHERE id = ?", (new_status, order_id)
-            )
+            await self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                await self.conn.execute(
+                    "UPDATE orders SET status = ? WHERE id = ?", (new_status, order_id)
+                )
+                await self.conn.execute(
+                    """INSERT INTO order_status_history (order_id, status, changed_by)
+                       VALUES (?, ?, ?)""",
+                    (order_id, new_status, changed_by),
+                )
+                await self.conn.execute("COMMIT")
+            except Exception:
+                await self.conn.execute("ROLLBACK")
+                raise
         return old_status
 
     async def get_stats(self) -> dict[str, int]:

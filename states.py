@@ -12,3 +12,20 @@ class AddProduct(StatesGroup):
 
 class EditProduct(StatesGroup):
     value = State()
+
+
+class Checkout(StatesGroup):
+    phone = State()
+    name = State()
+    delivery = State()
+    address = State()
+    comment = State()
+    confirm = State()
+
+
+class ChatWithManager(StatesGroup):
+    active = State()
+
+
+class ReplyToBuyer(StatesGroup):
+    message = State()

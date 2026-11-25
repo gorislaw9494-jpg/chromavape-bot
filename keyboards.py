@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 from utils import STATUS_EMOJI, fmt_price, truncate
 
@@ -17,10 +22,11 @@ def _markup(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
 def main_menu_kb(admin: bool, cart_count: int) -> InlineKeyboardMarkup:
     cart_text = f"🧺 Корзина ({cart_count})" if cart_count else "🧺 Корзина"
     rows = [
-        [_btn("🛍 Каталог", "menu:catalog")],
-        [_btn(cart_text, "menu:cart")],
+        [_btn("🛍 Каталог товаров", "menu:catalog")],
+        [_btn(cart_text, "menu:cart"), _btn("🧾 Оформить заказ", "menu:checkout")],
         [_btn("📦 Мои заказы", "menu:orders")],
-        [_btn("ℹ️ Контакты", "menu:contacts")],
+        [_btn("💬 Связаться с менеджером", "menu:contacts")],
+        [_btn("❓ Помощь", "menu:help")],
     ]
     if admin:
         rows.append([_btn("⚙️ Админ-панель", "admin:menu")])
@@ -93,18 +99,57 @@ def cart_kb(items) -> InlineKeyboardMarkup:
 
     if rows:
         rows.append([_btn("🧾 Оформить заказ", "cart:checkout")])
+        rows.append([_btn("🧹 Очистить корзину", "cart:clear")])
     rows.append([_btn("🛍 Продолжить покупки", "menu:catalog")])
     rows.append([_btn("🏠 Главное меню", "menu:main")])
     return _markup(rows)
+
+
+def cart_clear_confirm_kb() -> InlineKeyboardMarkup:
+    return _markup(
+        [
+            [_btn("🗑 Да, очистить", "cart:clear_confirm")],
+            [_btn("⬅️ Назад в корзину", "menu:cart")],
+        ]
+    )
 
 
 def checkout_confirm_kb() -> InlineKeyboardMarkup:
     return _markup(
         [
             [_btn("✅ Подтвердить заказ", "order:confirm")],
-            [_btn("⬅️ В корзину", "menu:cart")],
+            [_btn("❌ Отменить оформление", "checkout:cancel")],
         ]
     )
+
+
+def phone_request_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def skip_name_kb() -> InlineKeyboardMarkup:
+    return _markup([[_btn("Пропустить", "checkout:skip_name")]])
+
+
+def delivery_kb() -> InlineKeyboardMarkup:
+    return _markup(
+        [
+            [_btn("🚚 Доставка", "checkout:delivery:delivery")],
+            [_btn("🏪 Самовывоз", "checkout:delivery:pickup")],
+        ]
+    )
+
+
+def skip_comment_kb() -> InlineKeyboardMarkup:
+    return _markup([[_btn("Пропустить комментарий", "checkout:skip_comment")]])
+
+
+def chat_end_kb() -> InlineKeyboardMarkup:
+    return _markup([[_btn("Завершить чат", "chat:end")]])
 
 
 # --------------------------------------------------------------------- orders
@@ -234,28 +279,26 @@ def admin_orders_kb(orders, status_filter: str, page: int, total_pages: int) -> 
 def admin_order_kb(order_id: int, status: str) -> InlineKeyboardMarkup:
     rows = []
     if status == "new":
-        rows.append(
-            [
-                _btn("✅ Принять", f"aos:{order_id}:accepted"),
-                _btn("❌ Отменить", f"aos:{order_id}:cancelled"),
-            ]
-        )
+        rows.append([_btn("✅ Принять заказ", f"aos:{order_id}:accepted")])
     elif status == "accepted":
-        rows.append(
-            [
-                _btn("🚚 Отправить", f"aos:{order_id}:shipped"),
-                _btn("❌ Отменить", f"aos:{order_id}:cancelled"),
-            ]
-        )
-    elif status == "shipped":
-        rows.append(
-            [
-                _btn("🏁 Завершить", f"aos:{order_id}:completed"),
-                _btn("❌ Отменить", f"aos:{order_id}:cancelled"),
-            ]
-        )
+        rows.append([_btn("🛠 Заказ в работе", f"aos:{order_id}:processing")])
+    elif status == "processing":
+        rows.append([_btn("🚚 Отправить", f"aos:{order_id}:shipped")])
+    if status in {"accepted", "processing", "shipped"}:
+        rows.append([_btn("🏁 Заказ выполнен", f"aos:{order_id}:completed")])
+    if status not in {"completed", "cancelled"}:
+        rows.append([_btn("❌ Отменить заказ", f"aos:{order_id}:cancelled")])
+    rows.append([_btn("💬 Ответить покупателю", f"admin:reply:{order_id}")])
     rows.append([_btn("⬅️ К заказам", "admin:orders:all:0")])
     return _markup(rows)
+
+
+def admin_reply_kb(order_id: int) -> InlineKeyboardMarkup:
+    return _markup([[_btn("💬 Ответить покупателю", f"admin:reply:{order_id}")]])
+
+
+def buyer_reply_kb(order_id: int) -> InlineKeyboardMarkup:
+    return _markup([[_btn("💬 Ответить менеджеру", f"chat:order:{order_id}")]])
 
 
 def add_product_confirm_kb() -> InlineKeyboardMarkup:

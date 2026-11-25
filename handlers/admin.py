@@ -20,8 +20,9 @@ from keyboards import (
     admin_orders_kb,
     admin_product_kb,
     admin_products_kb,
+    buyer_reply_kb,
 )
-from states import AddProduct, EditProduct
+from states import AddProduct, EditProduct, ReplyToBuyer
 from utils import (
     fmt_price,
     notify_admins,
@@ -44,6 +45,26 @@ EDIT_PROMPTS = {
     "stock": "Введите новый остаток на складе (целое число):",
     "photo": "Отправьте новое фото товара или напишите «-», чтобы удалить фото:",
 }
+
+
+def _order_admin_text(order, items) -> str:
+    username = f"@{order['username']}" if order["username"] else "—"
+    full_name = order["full_name"] or "не указано"
+    method = "🚚 Доставка" if order["delivery_method"] == "delivery" else "🏪 Самовывоз"
+    return (
+        f"🧾 <b>Заказ №{order['id']}</b>\n\n"
+        f"👤 Покупатель: {html.escape(str(full_name))}\n"
+        f"🔗 Username: {html.escape(username)}\n"
+        f"🆔 Telegram ID: <code>{order['user_id']}</code>\n"
+        f"📞 Телефон: {html.escape(order['phone'] or '—')}\n"
+        f"🕒 {order['created_at']}\n"
+        f"Статус: {status_label(order['status'])}\n\n"
+        f"📦 Получение: {method}\n"
+        f"📍 Адрес: {html.escape(order['address'] or '—')}\n"
+        f"💬 Комментарий: {html.escape(order['comment'] or '—')}\n\n"
+        f"{order_items_text(items)}\n\n"
+        f"💰 <b>Итого: {fmt_price(order['total'])}</b>"
+    )
 
 
 # ------------------------------------------------------------------ admin menu
@@ -448,18 +469,7 @@ async def admin_order_card(callback: CallbackQuery) -> None:
         await callback.answer("Заказ не найден", show_alert=True)
         return
     items = await db.get_order_items(order_id)
-    username = f" (@{order['username']})" if order["username"] else ""
-    full_name = order["full_name"] or "Покупатель"
-    text = (
-        f"🧾 <b>Заказ №{order_id}</b>\n\n"
-        f"👤 {html.escape(str(full_name))}{html.escape(username)}\n"
-        f"🆔 <code>{order['user_id']}</code>\n"
-        f"🕒 {order['created_at']}\n"
-        f"Статус: {status_label(order['status'])}\n\n"
-        f"{order_items_text(items)}\n\n"
-        f"💰 <b>Итого: {fmt_price(order['total'])}</b>"
-    )
-    await safe_edit(callback, text, admin_order_kb(order_id, order["status"]))
+    await safe_edit(callback, _order_admin_text(order, items), admin_order_kb(order_id, order["status"]))
     await callback.answer()
 
 
@@ -467,33 +477,108 @@ async def admin_order_card(callback: CallbackQuery) -> None:
 async def admin_order_status(callback: CallbackQuery) -> None:
     _, order_id_raw, new_status = callback.data.split(":")
     order_id = int(order_id_raw)
-    old_status = await db.update_order_status(order_id, new_status)
+    old_status = await db.update_order_status(
+        order_id, new_status, changed_by=callback.from_user.id
+    )
     if old_status is None:
         await callback.answer("Это изменение недоступно", show_alert=True)
         return
 
     await callback.answer(f"Статус: {status_label(new_status)}")
     order = await db.get_order(order_id)
-    if order is not None:
-        try:
-            await callback.bot.send_message(
-                int(order["user_id"]),
-                f"🔔 Статус вашего заказа №{order_id} изменён: "
-                f"<b>{status_label(new_status)}</b>",
-            )
-        except Exception:
-            pass
+    if order is None:
+        return
+    try:
+        await callback.bot.send_message(
+            int(order["user_id"]),
+            f"🔔 Статус вашего заказа №{order_id} изменён: "
+            f"<b>{status_label(new_status)}</b>",
+        )
+    except Exception:
+        pass
 
     items = await db.get_order_items(order_id)
-    username = f" (@{order['username']})" if order["username"] else ""
-    full_name = order["full_name"] or "Покупатель"
-    text = (
-        f"🧾 <b>Заказ №{order_id}</b>\n\n"
-        f"👤 {html.escape(str(full_name))}{html.escape(username)}\n"
-        f"🆔 <code>{order['user_id']}</code>\n"
-        f"🕒 {order['created_at']}\n"
-        f"Статус: {status_label(order['status'])}\n\n"
-        f"{order_items_text(items)}\n\n"
-        f"💰 <b>Итого: {fmt_price(order['total'])}</b>"
-    )
-    await safe_edit(callback, text, admin_order_kb(order_id, order["status"]))
+    await safe_edit(callback, _order_admin_text(order, items), admin_order_kb(order_id, order["status"]))
+
+
+@router.message(Command("cancel"))
+async def admin_cancel_command(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Действие отменено. Откройте /admin для админ-панели.")
+
+
+@router.callback_query(F.data.startswith("admin:reply:"))
+async def admin_reply_start(callback: CallbackQuery, state: FSMContext) -> None:
+    order_id = int(callback.data.split(":")[2])
+    order = await db.get_order(order_id)
+    if order is None:
+        await callback.answer("Заказ не найден", show_alert=True)
+        return
+    await state.set_state(ReplyToBuyer.message)
+    await state.update_data(order_id=order_id, user_id=int(order["user_id"]))
+    if callback.message is not None:
+        await callback.message.answer(
+            f"💬 <b>Ответ покупателю по заказу №{order_id}</b>\n\n"
+            "Отправьте текст или фото. Оно будет доставлено покупателю в Telegram.\n"
+            "Для отмены отправьте /cancel."
+        )
+    await callback.answer("Введите сообщение")
+
+
+@router.message(ReplyToBuyer.message)
+async def admin_reply_send(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    order_id = int(data.get("order_id") or 0)
+    user_id = int(data.get("user_id") or 0)
+    if not order_id or not user_id:
+        await state.clear()
+        await message.answer("Не удалось определить заказ. Откройте заказ заново.")
+        return
+    if not message.text and not message.photo:
+        await message.answer("Отправьте текст или фото.")
+        return
+
+    try:
+        if message.photo:
+            caption = (
+                f"💬 <b>Ответ менеджера по заказу №{order_id}</b>\n\n"
+                f"{html.escape(message.caption or '📷 Фото')}"
+            )
+            await message.bot.send_photo(
+                user_id,
+                photo=message.photo[-1].file_id,
+                caption=caption,
+                reply_markup=buyer_reply_kb(order_id),
+            )
+            await db.add_chat_message(
+                user_id=user_id,
+                sender="admin",
+                order_id=order_id,
+                message_type="photo",
+                file_id=message.photo[-1].file_id,
+                text=message.caption,
+            )
+        else:
+            text = (
+                f"💬 <b>Ответ менеджера по заказу №{order_id}</b>\n\n"
+                f"{html.escape(message.text or '')}"
+            )
+            await message.bot.send_message(
+                user_id, text, reply_markup=buyer_reply_kb(order_id)
+            )
+            await db.add_chat_message(
+                user_id=user_id,
+                sender="admin",
+                order_id=order_id,
+                message_type="text",
+                text=message.text,
+            )
+    except Exception:
+        await state.clear()
+        await message.answer(
+            "❌ Не удалось доставить сообщение. Возможно, покупатель заблокировал бота."
+        )
+        return
+
+    await state.clear()
+    await message.answer(f"✅ Сообщение доставлено покупателю по заказу №{order_id}.")

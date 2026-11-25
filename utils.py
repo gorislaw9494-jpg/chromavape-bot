@@ -12,6 +12,7 @@ from config import config
 STATUS_LABELS = {
     "new": "🆕 Новый",
     "accepted": "✅ Принят",
+    "processing": "🛠 В работе",
     "shipped": "🚚 Отправлен",
     "completed": "🏁 Выполнен",
     "cancelled": "❌ Отменён",
@@ -20,6 +21,7 @@ STATUS_LABELS = {
 STATUS_EMOJI = {
     "new": "🆕",
     "accepted": "✅",
+    "processing": "🛠",
     "shipped": "🚚",
     "completed": "🏁",
     "cancelled": "❌",
@@ -111,5 +113,20 @@ async def notify_admins(bot: Bot, text: str, reply_markup: InlineKeyboardMarkup 
     for admin_id in config.admin_ids:
         try:
             await bot.send_message(admin_id, text, reply_markup=reply_markup)
+        except (TelegramForbiddenError, TelegramBadRequest):
+            continue
+
+
+async def notify_admins_photo(
+    bot: Bot,
+    photo: str,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    for admin_id in config.admin_ids:
+        try:
+            await bot.send_photo(
+                admin_id, photo=photo, caption=caption, reply_markup=reply_markup
+            )
         except (TelegramForbiddenError, TelegramBadRequest):
             continue
