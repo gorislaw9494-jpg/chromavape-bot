@@ -152,7 +152,7 @@ async def admin_category_products(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("ap:"))
+@router.callback_query(F.data.regexp(r"^ap:\d+:\d+:\d+$"))
 async def admin_product_card(callback: CallbackQuery) -> None:
     parts = callback.data.split(":")
     product_id = int(parts[1])
@@ -292,7 +292,8 @@ async def admin_product_edit_value(message: Message, state: FSMContext) -> None:
             return
         new_value = raw
 
-    await db.update_product(product_id, field, new_value)
+    db_field = "photo_file_id" if field == "photo" else field
+    await db.update_product(product_id, db_field, new_value)
     await state.clear()
     await message.answer("✅ Изменения сохранены.")
     await message.answer(
